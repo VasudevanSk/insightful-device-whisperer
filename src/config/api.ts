@@ -1,10 +1,19 @@
 // Flask API Configuration
 // Update this URL to point to your Flask backend
+export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+
 export const API_CONFIG = {
   // Default to localhost for development, override in production
-  BASE_URL: import.meta.env.VITE_API_URL || 'http://localhost:5000',
+  BASE_URL: API_BASE_URL,
   
   ENDPOINTS: {
+    // Auth endpoints
+    LOGIN: '/api/auth/login',
+    REGISTER: '/api/auth/register',
+    
+    // Upload endpoint
+    UPLOAD_DATASET: '/api/upload/dataset',
+    
     // Data endpoints
     USERS: '/api/users',
     USER_BY_ID: (id: number) => `/api/users/${id}`,

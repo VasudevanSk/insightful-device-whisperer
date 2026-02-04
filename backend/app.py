@@ -19,6 +19,11 @@ import numpy as np
 from pathlib import Path
 import pickle
 from functools import lru_cache
+import hashlib
+import jwt
+import datetime
+from werkzeug.utils import secure_filename
+import os
 
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
@@ -26,8 +31,58 @@ CORS(app)  # Enable CORS for all routes
 # Configuration
 DATA_PATH = Path(__file__).parent / 'data' / 'mobile_usage.csv'
 MODEL_PATH = Path(__file__).parent / 'models'
+UPLOAD_FOLDER = Path(__file__).parent / 'uploads'
+SECRET_KEY = 'your-secret-key-change-in-production'
+ALLOWED_EXTENSIONS = {'csv'}
+
+# In-memory user storage (use a database in production)
+users_db = {}
+user_datasets = {}  # Maps user_id to their uploaded dataset path
 
 # ============ Helper Functions ============
+
+def allowed_file(filename):
+    """Check if file has allowed extension"""
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+def hash_password(password):
+    """Simple password hashing (use bcrypt in production)"""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def generate_token(user_id):
+    """Generate JWT token"""
+    payload = {
+        'user_id': user_id,
+        'exp': datetime.datetime.utcnow() + datetime.timedelta(days=7)
+    }
+    return jwt.encode(payload, SECRET_KEY, algorithm='HS256')
+
+def verify_token(token):
+    """Verify JWT token and return user_id"""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])
+        return payload['user_id']
+    except jwt.ExpiredSignatureError:
+        return None
+    except jwt.InvalidTokenError:
+        return None
+
+def get_user_from_token():
+    """Get user from Authorization header"""
+    auth_header = request.headers.get('Authorization')
+    if not auth_header or not auth_header.startswith('Bearer '):
+        return None
+    token = auth_header.split(' ')[1]
+    user_id = verify_token(token)
+    if user_id and user_id in users_db:
+        return users_db[user_id]
+    return None
+
+def load_user_data(user_id=None):
+    """Load data - user-specific if uploaded, otherwise default"""
+    if user_id and user_id in user_datasets:
+        return pd.read_csv(user_datasets[user_id])
+    return pd.read_csv(DATA_PATH)
 
 @lru_cache(maxsize=1)
 def load_data():
@@ -70,6 +125,139 @@ def error_response(message, status_code=400, code=None):
     if code:
         response['code'] = code
     return jsonify(response), status_code
+
+# ============ Authentication Endpoints ============
+
+@app.route('/api/auth/register', methods=['POST'])
+def register():
+    """Register a new user"""
+    data = request.get_json()
+    if not data:
+        return error_response('No data provided', 400, 'NO_DATA')
+    
+    name = data.get('name', '').strip()
+    email = data.get('email', '').strip().lower()
+    password = data.get('password', '')
+    
+    if not name or len(name) < 2:
+        return error_response('Name must be at least 2 characters', 400, 'INVALID_NAME')
+    if not email or '@' not in email:
+        return error_response('Invalid email address', 400, 'INVALID_EMAIL')
+    if not password or len(password) < 6:
+        return error_response('Password must be at least 6 characters', 400, 'INVALID_PASSWORD')
+    
+    # Check if email already exists
+    for user in users_db.values():
+        if user['email'] == email:
+            return error_response('Email already registered', 400, 'EMAIL_EXISTS')
+    
+    # Create user
+    user_id = str(len(users_db) + 1)
+    users_db[user_id] = {
+        'id': int(user_id),
+        'name': name,
+        'email': email,
+        'password_hash': hash_password(password),
+    }
+    
+    token = generate_token(user_id)
+    
+    return success_response({
+        'user': {
+            'id': int(user_id),
+            'name': name,
+            'email': email,
+        },
+        'token': token,
+    }, 'Registration successful')
+
+@app.route('/api/auth/login', methods=['POST'])
+def login():
+    """Login user"""
+    data = request.get_json()
+    if not data:
+        return error_response('No data provided', 400, 'NO_DATA')
+    
+    email = data.get('email', '').strip().lower()
+    password = data.get('password', '')
+    
+    if not email or not password:
+        return error_response('Email and password are required', 400, 'MISSING_FIELDS')
+    
+    # Find user by email
+    user = None
+    user_id = None
+    for uid, u in users_db.items():
+        if u['email'] == email:
+            user = u
+            user_id = uid
+            break
+    
+    if not user:
+        return error_response('Invalid email or password', 401, 'INVALID_CREDENTIALS')
+    
+    if user['password_hash'] != hash_password(password):
+        return error_response('Invalid email or password', 401, 'INVALID_CREDENTIALS')
+    
+    token = generate_token(user_id)
+    
+    return success_response({
+        'user': {
+            'id': user['id'],
+            'name': user['name'],
+            'email': user['email'],
+        },
+        'token': token,
+    }, 'Login successful')
+
+# ============ File Upload Endpoints ============
+
+@app.route('/api/upload/dataset', methods=['POST'])
+def upload_dataset():
+    """Upload a CSV dataset"""
+    user = get_user_from_token()
+    if not user:
+        return error_response('Authentication required', 401, 'UNAUTHORIZED')
+    
+    if 'file' not in request.files:
+        return error_response('No file provided', 400, 'NO_FILE')
+    
+    file = request.files['file']
+    if file.filename == '':
+        return error_response('No file selected', 400, 'NO_FILE')
+    
+    if not allowed_file(file.filename):
+        return error_response('Only CSV files are allowed', 400, 'INVALID_FILE_TYPE')
+    
+    # Create upload folder if it doesn't exist
+    UPLOAD_FOLDER.mkdir(exist_ok=True)
+    
+    # Save file with user-specific name
+    filename = f"user_{user['id']}_{secure_filename(file.filename)}"
+    filepath = UPLOAD_FOLDER / filename
+    file.save(str(filepath))
+    
+    # Validate CSV structure
+    try:
+        df = pd.read_csv(filepath)
+        required_columns = ['User_ID', 'Device_Model', 'Operating_System', 'App_Usage_Time']
+        missing = [col for col in required_columns if col not in df.columns]
+        if missing:
+            os.remove(filepath)
+            return error_response(f'Missing required columns: {", ".join(missing)}', 400, 'INVALID_CSV')
+        
+        # Store reference to user's dataset
+        user_datasets[str(user['id'])] = str(filepath)
+        
+        return success_response({
+            'filename': filename,
+            'rows': len(df),
+            'columns': list(df.columns),
+        }, 'Dataset uploaded successfully')
+    except Exception as e:
+        if filepath.exists():
+            os.remove(filepath)
+        return error_response(f'Error processing CSV: {str(e)}', 400, 'CSV_PARSE_ERROR')
 
 # ============ Data Endpoints ============
 
