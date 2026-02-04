@@ -28,6 +28,10 @@ import os
 app = Flask(__name__)
 CORS(app)  # Enable CORS for all routes
 
+@app.route("/")
+def health():
+    return "Backend is running successfully 🚀"
+
 # Configuration
 DATA_PATH = Path(__file__).parent / 'data' / 'mobile_usage.csv'
 MODEL_PATH = Path(__file__).parent / 'models'
