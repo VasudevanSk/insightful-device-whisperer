@@ -1,6 +1,6 @@
 // Flask API Configuration
 // Update this URL to point to your Flask backend
-export const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+export const API_BASE_URL = import.meta.env.VITE_API_URL || 'https://insightful-device-whisperer-6.onrender.com';
 
 export const API_CONFIG = {
   // Default to localhost for development, override in production
